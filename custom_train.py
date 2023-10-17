@@ -1,11 +1,64 @@
+#!/usr/bin/env python
+# coding: utf8
+"""Example of training an additional entity type
+
+This script shows how to add a new entity type to an existing pre-trained NER
+model. To keep the example short and simple, only four sentences are provided
+as examples. In practice, you'll need many more — a few hundred would be a
+good start. You will also likely need to mix in examples of other entity
+types, which might be obtained by running the entity recognizer over unlabelled
+sentences, and adding their annotations to the training set.
+
+The actual training is performed by looping over the examples, and calling
+`nlp.entity.update()`. The `update()` method steps through the words of the
+input. At each word, it makes a prediction. It then consults the annotations
+provided on the GoldParse instance, to see whether it was right. If it was
+wrong, it adjusts its weights so that the correct action will score higher
+next time.
+
+After training your model, you can save it to a directory. We recommend
+wrapping models as Python packages, for ease of deployment.
+
+For more details, see the documentation:
+* Training: https://spacy.io/usage/training
+* NER: https://spacy.io/usage/linguistic-features#named-entities
+
+Compatible with: spaCy v2.1.0+
+Last tested with: v2.1.0
+"""
+from __future__ import unicode_literals
+from __future__ import print_function
 import re
-import json
-import logging
-import spacy
+import plac
 import random
 from pathlib import Path
-from spacy.training import Example
-from spacy.util import minibatch,compounding
+import spacy
+import json
+import logging
+
+
+# new entity label
+LABEL = "COL_NAME"
+
+# training data
+# Note: If you're using an existing model, make sure to mix in examples of
+# other entity types that spaCy correctly recognized before. Otherwise, your
+# model might learn the new type, but "forget" what it previously knew.
+# https://explosion.ai/blog/pseudo-rehearsal-catastrophic-forgetting
+
+# training data
+# TRAIN_DATA = [
+#     ("i study in maria college", {"entities": [(11, 24, LABEL)]}),
+#     ("completed graduation from napier university (edinburgh,
+#       united kingdom)", {"entities": [(26, 43, LABEL)]}),
+#     ("studied in school of continuing and professional studies",
+#       {"entities": [(11, 16, LABEL)]}),
+#     ("studied at chinese university of hong kong", {"entities":
+#       [(11, 29, LABEL)]}),
+#     ("studied in University of Strathclyde", {"entities":
+#       [(11, 37, LABEL)]}),
+# ]
+
 
 def trim_entity_spans(data: list) -> list:
     """Removes leading and trailing white spaces from entity spans.
@@ -16,8 +69,6 @@ def trim_entity_spans(data: list) -> list:
     Returns:
         list: The cleaned data.
     """
-    if data is None:
-        return []
     invalid_span_tokens = re.compile(r'\s')
 
     cleaned_data = []
@@ -37,6 +88,8 @@ def trim_entity_spans(data: list) -> list:
         cleaned_data.append([text, {'entities': valid_entities}])
 
     return cleaned_data
+
+
 def convert_dataturks_to_spacy(dataturks_JSON_FilePath):
     try:
         training_data = []
@@ -65,43 +118,45 @@ def convert_dataturks_to_spacy(dataturks_JSON_FilePath):
                             point['end'] + 1,
                             label
                         ))
-            entities=merge_overlapping_entities(entities)
+
             training_data.append((text, {"entities": entities}))
         return training_data
     except Exception:
         logging.exception("Unable to process " + dataturks_JSON_FilePath)
         return None
-def merge_overlapping_entities(entities):
-    entities.sort(key=lambda x: x[0])  # Sort entities by start offset
-    merged_entities = []
-    current_entity = None
 
-    for start, end, label in entities:
-        if current_entity is None or start > current_entity[1]:
-            # No overlap with the current entity, add a new one
-            current_entity = (start, end, label)
-            merged_entities.append(current_entity)
-        else:
-            # There is an overlap, merge entities
-            current_entity = (current_entity[0], max(end, current_entity[1]), label)
-            merged_entities[-1] = current_entity
 
-    return merged_entities
 TRAIN_DATA = trim_entity_spans(convert_dataturks_to_spacy("traindata.json"))
 
-def main(model=None, new_model_name="training", output_dir='/Users/mrmjpatra/Documents/SmalldayTech/OnBoardingResume/parser1', n_iter=30):
-    if model is not None:
-        nlp = spacy.load(model)  # load existing spacy model
-        print(f"Loaded model '{model}'")
-    else:
-        nlp = spacy.blank("en")  # create blank language class
-        print("Created blank 'en' model")
 
-    # add entity recognizer to model if it's not in the pipeline
-    # nlp.create_pipe works for built-ins that are registered with spacy
+@plac.annotations(
+    model=("Model name. Defaults to blank 'en' model.", "option", "m", str),
+    new_model_name=("New model name for model meta.", "option", "nm", str),
+    output_dir=("Optional output directory", "option", "o", Path),
+    n_iter=("Number of training iterations", "option", "n", int),
+)
+def main(
+    model=None,
+    new_model_name="training",
+    output_dir='/home/omkarpathak27/Downloads/zipped/pyresparser/pyresparser',
+    n_iter=30
+):
+    """Set up the pipeline and entity recognizer, and train the new entity."""
+    random.seed(0)
+    if model is not None:
+        nlp = spacy.load(model)  # load existing spaCy model
+        print("Loaded model '%s'" % model)
+    else:
+        nlp = spacy.blank("en")  # create blank Language class
+        print("Created blank 'en' model")
+    # Add entity recognizer to model if it's not in the pipeline
+    # nlp.create_pipe works for built-ins that are registered with spaCy
+
     if "ner" not in nlp.pipe_names:
         print("Creating new pipe")
-        ner = nlp.add_pipe("ner")
+        ner = nlp.create_pipe("ner")
+        nlp.add_pipe(ner, last=True)
+
     # otherwise, get it, so we can add labels to it
     else:
         ner = nlp.get_pipe("ner")
@@ -115,27 +170,27 @@ def main(model=None, new_model_name="training", output_dir='/Users/mrmjpatra/Doc
     #     optimizer = nlp.begin_training()
     # else:
     #     optimizer = nlp.resume_training()
-
-    optimizer = nlp.initialize()
-
     move_names = list(ner.move_names)
     # get names of other pipes to disable them during training
     other_pipes = [pipe for pipe in nlp.pipe_names if pipe != "ner"]
-    
-    with nlp.select_pipes(enable=["ner"]):
-        # batch up the examples using spacy's minibatch
+    with nlp.disable_pipes(*other_pipes):  # only train NER
+        optimizer = nlp.begin_training()
+        # batch up the examples using spaCy's minibatch
         for itn in range(n_iter):
-            print(f"Starting iteration {itn}")
+            print("Starting iteration " + str(itn))
             random.shuffle(TRAIN_DATA)
             losses = {}
-            batches = minibatch(TRAIN_DATA, size=compounding(4.0, 32.0, 1.001))
-            for batch in batches:
-                texts, annotations = zip(*batch)
-                example = [Example.from_dict(nlp.make_doc(text), annotation) for text, annotation in zip(texts, annotations)]
-                nlp.update(example, drop=0.2, sgd=optimizer, losses=losses)
+            for text, annotations in TRAIN_DATA:
+                nlp.update(
+                    [text],  # batch of texts
+                    [annotations],  # batch of annotations
+                    drop=0.2,  # dropout - make it harder to memorise data
+                    sgd=optimizer,  # callable to update weights
+                    losses=losses)
             print("Losses", losses)
 
-    test_text = "marathwada mitra mandals college of engineering"
+    # test the trained model
+    test_text = "Marathwada Mitra Mandals College of Engineering"
     doc = nlp(test_text)
     print("Entities in '%s'" % test_text)
     for ent in doc.ents:
@@ -159,4 +214,6 @@ def main(model=None, new_model_name="training", output_dir='/Users/mrmjpatra/Doc
         for ent in doc2.ents:
             print(ent.label_, ent.text)
 
-main()
+
+if __name__ == "__main__":
+    plac.call(main)
